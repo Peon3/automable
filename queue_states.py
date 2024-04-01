@@ -66,7 +66,7 @@ def liverpool_queue_state():
         free_nodes = 0
         queued_calcs = n-16
     elif n-2 < 14:
-        free_nodes = n-2
+        free_nodes = 14-(n-2)
         queued_calcs = 0
 
     liverpool_info_obj = ('liverpool', str(free_nodes), str(queued_calcs))

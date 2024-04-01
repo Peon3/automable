@@ -15,11 +15,13 @@ Roadmap
 End
 
 Init
-    GeomBlock   1-10
+    Geom
+        Block   1-10
         Charge  0,1
         Mult    1,2
     End
-    GeomBlock   11-20
+    Geom
+        Block   11-20
         Charge  3
         Mult    12
     End
