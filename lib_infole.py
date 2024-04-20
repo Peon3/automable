@@ -5,3 +5,5 @@ settings_info = { "functional" : ("bp86", "b3lyp", "tpssh", "pbe0"),
 
 for i in settings_info["functional"]:
     print(i)
+
+#first define all regular info_objects, than define the schedule info_object
