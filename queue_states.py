@@ -78,4 +78,10 @@ def all_queue_state():
     all_states.append(liverpool_queue_state())
     return all_states
 
+def main():
+    print("this is a lib")
+
+if __name__ == "__main__":
+	main()
+
 #print(all_queue_state())
