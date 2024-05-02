@@ -9,5 +9,11 @@ from queue_states import all_queue_state
 # Write the initial input files, sub calculations (likely just utilizing suborca.py or 5suborca1 on liverpool)
 # 
 
+def main():
+    print(all_queue_state())
 
-print(all_queue_state())
+global_info = { 'struc' : 'some tree will be here',
+               }
+
+if __name__ == "__main__":
+	main()
