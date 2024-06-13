@@ -19,7 +19,7 @@ class global_info:
             if len(projects) <= 0:
                 return self, Exception
     except TypeError:
-         return
+        return
             
 
 

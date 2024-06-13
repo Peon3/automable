@@ -13,7 +13,7 @@ def main():
     setup_followup(nprocs='33', maxcore='12000', add='\n%geom\ninhess read\ninhessname "in.hess"\nend\n')
 	#print("this is a lib")
 
-def setup_dir(new_calc_type, mode, *args):
+def setup_dir(new_calc_type:int, mode, *args):
     try:
         if mode == 'linear':
             os.mkdir('./'+new_calc_type+'/')
