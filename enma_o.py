@@ -12,8 +12,7 @@ from queue_states import all_queue_state
 def main():
     print(all_queue_state())
 
-global_info = { 'struc' : 'some tree will be here',
-               }
+
 
 if __name__ == "__main__":
 	main()
