@@ -129,6 +129,31 @@ def create_keyword_dict() -> dict:
     }
     return all_keywords
 
+def create_keyblock_dict() -> dict:
+    #########################################################
+    #  Returns a dict with orca blocks and their keywords   #
+    #########################################################
+
+    all_keyblocks = {
+        #####################################################
+        # Start basis block                                 #
+        #####################################################
+        
+        #####################################################
+        # Start Aux basis sets                              #
+        #####################################################
+        
+        #####################################################
+        # Start CalcTypes and Settings                      #
+        #####################################################
+        
+        #####################################################
+        # Start DFT Functionals                             #
+        #####################################################
+        
+    }
+    return all_keyblocks
+
 def main():
     all_keywords = create_keyword_dict()
     print('dkh-def2-svp'.casefold() in all_keywords)

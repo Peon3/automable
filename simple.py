@@ -1,17 +1,19 @@
 #! usr/bin/python3
 import argparse
 import os, sys
-from lib_keyword_dict import create_keyword_dict
+from lib_keyword_dict import create_keyword_dict, create_keyblock_dict
 
 class input_info_objects:
-    def __init__(self, **kwargs):
-        if len(kwargs) != self.required_attributes:
-            raise TypeError(f"Excpected {self.required_attributes} arguments, recieved {len(kwargs)}")
-        
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-        
-        required_attributes = 3
+    def __init__(self, name:str):
+        setattr(self, 'CalcName', name)
+
+    def sanity_check(self, keyword_dict:dict, keyblock_dict:dict):
+        try:
+            if (getattr(self, 'basis') in keyword_dict.keys()) == False:
+                print('The given basis is not in the list of known basis sets, something wrong here')
+                sys.exit()
+        except AttributeError:
+            print('Your calculation settings are missing a basis set. No matter what you do, that kinda can\'t be right...')
 
 
 def read_write_inp() -> list:
@@ -36,9 +38,7 @@ def read_write_inp() -> list:
                 if entry.casefold() in keyword_dict and keyword_dict[entry.casefold()] == 'basis'.casefold() and '!' in line.casefold():
                     new_lines.add('! '+args.new_basis) 
                 elif entry.casefold() in keyword_dict and '!' in line.casefold():
-
-
-
+                    print('kekw')
     return info_obj
 
 """ def read_inp_help() -> list:    # tis for later to adapt, for now we go for a simple approach
@@ -76,6 +76,9 @@ def read_write_inp() -> list:
         info_obj = []
         with open(args.files[0], 'r') as set_file:
             
-    return info_obj """
-
+    return info_obj 
+    
+    
 def set_up_geom():
+
+    """
