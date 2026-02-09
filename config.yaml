@@ -1,0 +1,39 @@
+# project_config.yaml
+
+# 1. Hardware / Global Settings
+resources:
+  n_cores: 14
+  mem_per_core: 12000 # MB
+  max_concurrent_jobs: 100
+  
+# 2. Chemistry Defaults
+chemistry:
+  charge: 0
+  multiplicity: 1 # Default, can be overridden by job_data
+  functional: "r2scan-3c"
+  solvation: "CPCM(THF)"
+
+# 3. The Pipelines (The "different treatments")
+pipelines:
+  
+  # --- Profile A: The "Full Monty" (Reactants) ---
+  # Computes everything: UV/Vis, Raman, Moessbauer
+  reactant_full_spec:
+    optimization:
+      next_steps:
+        - stage: frequency
+          folder: "02_Freq"
+          validation_mode: "minimum" # Special validation logic
+    
+    frequency:
+      next_steps: [] # Leaf node
+
+  # --- Profile B: The "Exotic Intermediate" ---
+  # Skips UV/Vis, adds EPR and XAS
+  intermediate_epr_xas:
+    optimization:
+      next_steps:
+          
+    optimization: 
+      next_steps: []
+    # ... etc ...
