@@ -2,16 +2,21 @@
 
 # 1. Hardware / Global Settings
 resources:
-  n_cores: 14
-  mem_per_core: 12000 # MB
+  host: "rigi"
+  username: "lege"
+  n_cores: 1
+  mem_per_core: 2000 # MB
   max_concurrent_jobs: 100
   
 # 2. Chemistry Defaults
 chemistry:
   charge: 0
   multiplicity: 1 # Default, can be overridden by job_data
-  functional: "r2scan-3c"
-  solvation: "CPCM(THF)"
+  functional: ["BP86", "B3LYP"]
+  basis_set: "sv"
+  dispersion: "D4"
+  aux_basis: "def2/J"
+    #  solvation: "CPCM(ACETONE)"
 
 # 3. The Pipelines (The "different treatments")
 pipelines:
@@ -27,6 +32,7 @@ pipelines:
     
     frequency:
       next_steps: [] # Leaf node
+      functional: "PBE"
 
   # --- Profile B: The "Exotic Intermediate" ---
   # Skips UV/Vis, adds EPR and XAS

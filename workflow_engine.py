@@ -19,7 +19,7 @@ class WorkflowEngine:
             return  # Leaf node
         
         next_steps = current_stage_rules.get('next_steps', [])
-        print(f"Spawning {len(next_steps)} children for {completed_job.molecule_name}...")
+        print(f"Spawning {len(next_steps)} children for {completed_job.molecule_name}, {completed_job.params.get('functional')}...")
 
         for step in next_steps:
             new_type = step['stage']
@@ -37,9 +37,17 @@ class WorkflowEngine:
                 pipeline_profile=profile_name
             )
             
-            # Pass down specific config like validation_mode
-            if 'validation_mode' in step:
-                new_job.params['validation_mode'] = step['validation_mode']
+            # 1. Inherit params from parent (propagates functional, basis_set, etc.)
+            new_job.params = completed_job.params.copy()
+
+            # 2. Apply overrides from the target stage definition in the roadmap
+            target_stage_rules = roadmap.get(new_type, {})
+            stage_overrides = {k: v for k, v in target_stage_rules.items() if k != 'next_steps'}
+            new_job.params.update(stage_overrides)
+
+            # 3. Apply overrides from the step config (e.g. specific settings for this stage)
+            overrides = {k: v for k, v in step.items() if k not in ['stage', 'folder']}
+            new_job.params.update(overrides)
 
             # Register with StateManager
             self.manager.add_job(new_job)

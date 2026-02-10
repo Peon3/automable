@@ -31,10 +31,29 @@ def scan_inputs(project_root: Path, manager: StateManager, config: dict):
     # 2. Identify what we already have to avoid duplicates
     # We track (molecule_name, pipeline_profile) for root jobs (parent_id is None)
     existing_roots = {
-        (j.molecule_name, j.pipeline_profile) 
+        (j.molecule_name, j.pipeline_profile, j.params.get('functional')) 
         for j in manager.jobs.values() 
         if j.parent_id is None
     }
+
+    # Prepare functional configurations from config
+    chem = config.get('chemistry', {})
+    functional_configs = []
+    
+    # Determine source: 'functionals' list or 'functional' (which might be list or str)
+    raw_source = chem.get('functionals')
+    if raw_source is None:
+        raw_source = chem.get('functional', 'default')
+        
+    # Ensure it is a list
+    if not isinstance(raw_source, list):
+        raw_source = [raw_source]
+
+    for f in raw_source:
+        if isinstance(f, str):
+            functional_configs.append({'functional': f})
+        elif isinstance(f, dict):
+            functional_configs.append(f)
 
     # 3. Iterate over pipelines defined in config
     for profile_name, roadmap in config.get('pipelines', {}).items():
@@ -45,36 +64,51 @@ def scan_inputs(project_root: Path, manager: StateManager, config: dict):
         for xyz_file in profile_dir.glob("*.xyz"):
             mol_name = xyz_file.stem
             
-            # Skip if we already tracked this input
-            if (mol_name, profile_name) in existing_roots:
-                continue
+            # Iterate over all requested functionals
+            for f_conf in functional_configs:
+                f_name = f_conf.get('functional', 'default')
+                
+                # Skip if we already tracked this input for this functional
+                if (mol_name, profile_name, f_name) in existing_roots:
+                    continue
 
-            print(f"  -> Found new input: {mol_name} for pipeline '{profile_name}'")
-            
-            # Determine start stage (default to 'optimization' or first key in roadmap)
-            if not roadmap:
-                print(f"Warning: Pipeline {profile_name} is empty.")
-                continue
-            
-            start_stage = "optimization" if "optimization" in roadmap else list(roadmap.keys())[0]
-            
-            # Setup working directory: work/<profile>/<mol>/<stage>
-            # We use a 'work' folder to keep calculations separate from 'inputs'
-            work_dir = project_root / "work" / profile_name / mol_name / start_stage
-            work_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Copy input file to standard name 'inp.xyz' expected by the submitter
-            shutil.copy(xyz_file, work_dir / "inp.xyz")
-            
-            # Create and register the Root Job
-            new_job = Job(
-                molecule_name=mol_name,
-                stage=start_stage,
-                parent_id=None, # Root job has no parent
-                working_dir=str(work_dir),
-                pipeline_profile=profile_name
-            )
-            manager.add_job(new_job)
+                print(f"  -> Found new input: {mol_name} for pipeline '{profile_name}' ({f_name})")
+                
+                # Determine start stage (default to 'optimization' or first key in roadmap)
+                if not roadmap:
+                    print(f"Warning: Pipeline {profile_name} is empty.")
+                    continue
+                
+                start_stage = "optimization" if "optimization" in roadmap else list(roadmap.keys())[0]
+                
+                # Build Params: Global Defaults -> Functional Config -> Stage Overrides
+                job_params = {k:v for k,v in chem.items() if k not in ['functionals', 'functional']}
+                job_params.update(f_conf)
+                
+                # Check for pipeline-level overrides for the start stage
+                stage_rules = roadmap.get(start_stage, {})
+                overrides = {k:v for k,v in stage_rules.items() if k != 'next_steps'}
+                job_params.update(overrides)
+
+                # Setup working directory: work/<profile>/<mol>/<functional>/<stage>
+                # We add a functional folder to avoid collisions
+                safe_f = str(f_name).replace(" ", "_").replace("(", "").replace(")", "")
+                work_dir = project_root / "work" / profile_name / mol_name / safe_f / start_stage
+                work_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy input file to standard name 'inp.xyz' expected by the submitter
+                shutil.copy(xyz_file, work_dir / "inp.xyz")
+                
+                # Create and register the Root Job
+                new_job = Job(
+                    molecule_name=mol_name,
+                    stage=start_stage,
+                    parent_id=None, # Root job has no parent
+                    working_dir=str(work_dir),
+                    pipeline_profile=profile_name
+                )
+                new_job.params = job_params
+                manager.add_job(new_job)
 
 def main():
     # --- 1. Setup & Configuration ---
@@ -123,7 +157,7 @@ def main():
     jobs_to_parse = manager.get_jobs_by_status("needs_parsing")
     
     for job in jobs_to_parse:
-        print(f"Validating {job.molecule_name}...")
+        print(f"Validating {job.molecule_name}, {job.params.get('functional')}...")
         success = validator.validate(job) # Returns True/False, updates job.results
         
         if success:
@@ -144,6 +178,11 @@ def main():
 
     # --- 5. Submit (The Actuator) ---
     pending_jobs = manager.get_jobs_by_status("pending")
+    
+    # Cache cluster status if we have work to do
+    cluster_status = {}
+    if pending_jobs:
+        cluster_status = cluster.get_free_slots()
     
     for job in pending_jobs:
         print(f"Preparing {job.molecule_name}...")
@@ -167,21 +206,52 @@ def main():
 
         # Context building
         chem = config['chemistry']
-        res = config.get('resources', {})
+
+        # Helper to resolve param: Job Param > Global Config > Default
+        def resolve(key, default=None):
+            if key in job.params:
+                return job.params[key]
+            return chem.get(key, default)
+
+        # --- Resource Selection Logic ---
+        # 1. Gather candidates (List of Dicts)
+        # Check job.params['resources'] first, then config['resources']
+        res_input = job.params.get('resources')
+        if not res_input:
+            res_input = config.get('resources', {})
+            
+        # Normalize to list
+        if isinstance(res_input, dict):
+            res_candidates = [res_input]
+        elif isinstance(res_input, list):
+            res_candidates = res_input
+        else:
+            res_candidates = [{'n_cores': 32, 'mem_per_core': 13000}] # Fallback
+
+        # 2. Select best candidate
+        selected_res = res_candidates[0] # Default to first
+        
+        if len(res_candidates) > 1:
+            for cand in res_candidates:
+                label = cand.get('node_label')
+                if label and cluster_status.get(label, 0) > 0:
+                    selected_res = cand
+                    print(f"  -> Routing to {label} (Free: {cluster_status[label]})")
+                    break
 
         context = {
             "molecule_name": job.molecule_name,
             "xyz_coord_fname": xyz_source,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "charge": chem.get('charge', 0),
-            "multiplicity": chem.get('multiplicity', 1),
-            "functional": chem.get('functional', 'r2scan-3c'),
-            "basis_set": chem.get('basis_set', ''),
-            "dispersion": chem.get('dispersion', ''),
-            "aux_basis": chem.get('aux_basis', 'AutoAux'),
-            "solvent_model": chem.get('solvation', ''),
-            "n_cores": res.get('n_cores', 14),
-            "mem_per_core": res.get('mem_per_core', '13000')
+            "charge": resolve('charge', 0),
+            "multiplicity": resolve('multiplicity', 1),
+            "functional": resolve('functional', 'r2scan-3c'),
+            "basis_set": resolve('basis_set', ''),
+            "dispersion": resolve('dispersion', ''),
+            "aux_basis": resolve('aux_basis', 'AutoAux'),
+            "solvent_model": resolve('solvation', ''),
+            "n_cores": selected_res.get('n_cores', 14),
+            "mem_per_core": selected_res.get('mem_per_core', '13000')
         }
         
         # Render

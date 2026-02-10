@@ -1,5 +1,5 @@
 import subprocess
-from typing import Set
+from typing import Set, Dict
 
 class ClusterInterface:
     """
@@ -79,3 +79,31 @@ class ClusterInterface:
                     active_ids.add(job_id_str)
                     
         return active_ids
+
+    def get_free_slots(self) -> Dict[str, int]:
+        """
+        Checks available nodes based on the user's specific cluster layout.
+        Returns a dict like {'cpu-44': 2, 'cpu-48': 0}
+        """
+        # Hardcoded totals from user alias
+        totals = {
+            "cpu-44": 5,
+            "cpu-48": 12,
+            "cpu-12": 12,
+            "cpu-14": 4,
+            "cpu-32": 13
+        }
+        
+        output = self._run_ssh_command("qstat -n")
+        if not output:
+             return {}
+
+        free_slots = {}
+        lines = output.splitlines()
+        for node_type, total in totals.items():
+            # Count lines containing node_type (matches 'grep | wc -l')
+            occupied = sum(1 for line in lines if node_type in line)
+            free = total - occupied
+            free_slots[node_type] = max(0, free)
+            
+        return free_slots
