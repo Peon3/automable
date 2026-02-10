@@ -26,7 +26,7 @@ class WorkflowEngine:
             folder_name = step['folder']
 
             new_working_dir = Path(completed_job.working_dir) / folder_name
-            new_name = f"{completed_job.molecule_name}_{folder_name}"
+            new_name = f"{completed_job.molecule_name}"
             
             # Create the Job Object
             new_job = Job(
