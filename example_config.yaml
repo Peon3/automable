@@ -1,0 +1,230 @@
+# project_config.yaml
+
+# 1. Global Hardware / Resource Settings
+resources:
+  host: "rigi"
+  username: "lege"
+  n_cores: 14 # Default number of cores
+  mem_per_core: 13000 # MB, Default memory per core
+  max_concurrent_jobs: 100
+  
+# 2. Chemistry Defaults
+chemistry:
+  charge: 0
+  multiplicity: 1 # Default, can be overridden by job_data
+  functional: ["BP86", "B3LYP"] # List of functionals to run for each input
+  basis_set: "def2-SVP"
+  dispersion: "D3BJ"
+  aux_basis: "def2/J"
+  solvation: "CPCM(WATER)" # Example global solvation model
+  
+  # Global TDDFT / Excited State Defaults
+  nroots: 10
+  triplets: "false"
+  tda: "true"
+  dosoc: "false"
+  iroot: 1
+
+# 3. The Pipelines (The "different treatments")
+pipelines:
+  
+  # --- Pipeline 1: Standard Optimization and Frequency Analysis ---
+  # Demonstrates basic chaining and stage-specific overrides for functional and validation mode.
+  standard_opt_freq:
+    TightOpt:
+      next_steps:
+        - stage: Freq
+          folder: "02_Freq"
+    
+    Freq:
+      next_steps: [] # Leaf node
+      functional: "PBE" # Override functional for frequency calculation
+      basis_set: "def2-TZVP" # Override basis set for frequency
+      validation_mode: "minimum" # Validate for a true minimum
+      resources: # Specific resources for frequency
+        - n_cores: 12
+          mem_per_core: 50000
+          node_label: "cpu-12" # Prefer high-memory node
+        - n_cores: 48
+          mem_per_core: 3000
+          node_label: "cpu-48" # Fallback node
+
+  # --- Pipeline 2: Transition State Search (New) ---
+  # Uses the new OptTS stage. Requires a Hessian from a previous Freq step.
+  ts_search_chain:
+    TightOpt: # 1. Pre-optimization (constrained or loose guess)
+      next_steps:
+        - stage: Freq
+          folder: "02_PreFreq"
+    
+    Freq: # 2. Calculate Hessian for TS search
+      next_steps:
+        - stage: OptTS
+          folder: "03_OptTS"
+      validation_mode: "minimum" 
+      
+    OptTS: # 3. The Transition State Optimization
+      next_steps:
+        - stage: Freq
+          folder: "04_TS_Freq"
+      # OptTS specific parameters
+      ts_mode: "10" # Follow mode 10
+      recalc_hess: "5" # Recalculate Hessian every 5 steps
+      # hybrid_hess: [1, 2, 3] # Optional: Atoms for hybrid hessian
+
+  # --- Pipeline 2: UV/Vis Spectrum Calculation (TDDFT) ---
+  # Demonstrates TDDFT calculation after optimization, with specific TDDFT parameters.
+  uvvis_spectrum:
+    TightOpt:
+      next_steps:
+        - stage: tddft
+          folder: "02_TDDFT"
+    
+    tddft:
+      next_steps: []
+      nroots: 20 # Calculate 20 excited states
+      tda: "false" # Use RPA instead of TDA for this step
+      solvation: "CPCM(ACETONITRILE)" # Override solvation for TDDFT
+
+  # --- Pipeline 3: Excited State Geometry Optimization ---
+  # Optimizes a specific excited state.
+  excited_state_opt:
+    TightOpt:
+      next_steps:
+        - stage: tddft_opt
+          folder: "02_ExcitedOpt"
+    
+    tddft_opt:
+      next_steps: []
+      iroot: 2 # Optimize the 2nd excited state
+      triplets: "true" # Consider triplet states
+
+  # --- Pipeline 4: Moessbauer Spectroscopy Calculation ---
+  # Example for a specific spectroscopy type.
+  moessbauer_calc:
+    TightOpt:
+      next_steps:
+        - stage: moessbauer
+          folder: "02_Moessbauer"
+    
+    moessbauer:
+      next_steps: []
+      # Moessbauer specific settings can be hardcoded in template or passed here
+
+  # --- Pipeline 5: NEB Transition State Search (Reactant Side) ---
+  # This pipeline starts with the reactant optimization and then initiates the NEB.
+  # It relies on a separate pipeline (e.g., 'product_opt') to provide the product structure.
+  neb_reactant_path:
+    TightOpt:
+      next_steps:
+        - stage: neb_ci
+          folder: "02_NEB"
+          # New: Define pairs. If the current job matches 'reactant', it spawns the NEB.
+          neb_pairs:
+            - reactant: "Reactant_A"
+              product: "Product_B"
+            - reactant: "Reactant_A"
+              product: "Product_C"
+          n_images: 8 # Number of images for NEB
+          # You could also specify 'neb_ts' here if you prefer a different NEB method
+
+  # --- Pipeline 6: NEB Transition State Search (Product Side) ---
+  # This pipeline is for the product molecule, which will be used by 'neb_reactant_path'.
+  product_opt:
+    TightOpt:
+      next_steps: [] # This is a terminal optimization for the product
+
+  # --- Pipeline 7: IRC Pathway Following ---
+  # Requires a transition state optimization and frequency calculation first to get the Hessian.
+  irc_pathway:
+    OptTS: # Start from a TS optimization (assuming parent Hessian exists or is provided)
+      next_steps:
+        - stage: Freq
+          folder: "02_TS_Freq"
+    
+    Freq: # Validate TS and generate Hessian for IRC
+      next_steps:
+        - stage: irc
+          folder: "03_IRC"
+      validation_mode: "transition_state" # Ensure exactly one imaginary frequency
+    
+    irc:
+      next_steps: []
+      # IRC specific settings like direction (forward/backward) can be added here
+
+  # --- Pipeline 8: Custom SCF and Tight Optimization ---
+  # Demonstrates using other template-only stages.
+  custom_scf_tight_opt:
+    SCF: # Assuming 'SCF' is a valid stage in your template_map
+      next_steps:
+        - stage: TightOpt
+          folder: "02_TightOpt"
+          functional: "PBE0" # Override functional for this specific opt
+    
+    TightOpt:
+      next_steps: []
+      # Further settings for TightOpt
+
+  # --- Pipeline 9: Loose Optimization and Numerical Frequency ---
+  loose_opt_num_freq:
+    LooseOpt:
+      next_steps:
+        - stage: NumFreq
+          folder: "02_NumFreq"
+    
+    NumFreq:
+      next_steps: []
+      # Settings for numerical frequency
+
+  # --- Pipeline 10: Complex NEB -> OptTS -> IRC Chain ---
+  # 1. Opt & Freq (Reactant & Product) -> 2. NEB (Merge) -> 3. OptTS -> 4. IRC -> 5. Opt (Split)
+  complex_neb_chain:
+    TightOpt:
+      next_steps:
+        - stage: Freq
+          folder: "02_PreNebFreq"
+    
+    Freq:
+      next_steps:
+        - stage: neb_ci
+          folder: "03_NEB"
+          # Define the Merge: Reactant spawns NEB using Product structure
+          neb_pairs:
+            - reactant: "Reactant_A"
+              product: "Product_B"
+      validation_mode: "minimum"
+
+    neb_ci:
+      next_steps:
+        - stage: NebFreq
+          folder: "04_NebFreq"
+      n_images: 10
+
+    NebFreq: # Frequency on NEB result (TS Guess)
+      next_steps:
+        - stage: OptTS
+          folder: "05_OptTS"
+      validation_mode: "transition_state" # Expect 1 imaginary mode
+
+    OptTS: # Refine the Transition State
+      next_steps:
+        - stage: TsFreq
+          folder: "06_TsFreq"
+    
+    TsFreq: # Confirm TS and generate Hessian for IRC
+      next_steps:
+        - stage: irc
+          folder: "07_IRC"
+    
+    irc: # Intrinsic Reaction Coordinate
+      next_steps:
+        - stage: IrcOpt # Engine should spawn 2 jobs here (Forward & Reverse)
+          folder: "08_IrcOpt"
+    
+    IrcOpt: # Optimize the IRC endpoints (Reactant/Product recovery)
+      next_steps:
+        - stage: IrcFreq
+          folder: "09_IrcFreq"
+
+    IrcFreq:
+      next_steps: []

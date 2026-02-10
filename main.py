@@ -134,8 +134,21 @@ def main():
 
     # Mapping abstract stages to concrete template files
     template_map = {
-        "optimization": "orca_opt.inp.j2",
-        "frequency": "orca_freq.inp.j2", # Assuming these exist or will exist
+        "SCF": "orca_scf.inp.j2",
+        "OptTS": "orca_optTS.inp.j2",
+        "TightOpt": "orca_tight_opt.inp.j2",
+        "LooseOpt": "orca_loose_opt.inp.j2",
+        "Freq": "orca_ana_freq.inp.j2", 
+        "NumFreq": "orca_num_freq.inp.j2", 
+        "tddft": "orca_tddft_spec.inp.j2",
+        "tddft_opt": "orca_tddft_exc_opt.inp.j2",
+        "neb_ci": "orca_neb_ci.inp.j2",
+        "neb_ts": "orca_neb_ts.inp.j2",
+        "irc": "orca_irc.inp.j2",
+        "NebFreq": "orca_ana_freq.inp.j2",
+        "TsFreq": "orca_ana_freq.inp.j2",
+        "IrcOpt": "orca_tight_opt.inp.j2",
+        "IrcFreq": "orca_ana_freq.inp.j2",
     }
 
     print(f"--- Daemon Cycle for {project_root.name} ---")
@@ -195,11 +208,36 @@ def main():
         # Fetch parent for coordinates/orbitals if needed
         parent_job = manager.get_job_by_id(job.parent_id) if job.parent_id else None
         
+        # Check if the job has a specific start structure defined (e.g. IRC split)
+        initial_xyz_param = job.params.get('initial_xyz')
+        
         # Determine XYZ source: Prefer local 'input.xyz' (Rescue jobs), else Parent
         if (job_dir / "inp.xyz").exists():
             xyz_source = "inp.xyz"
+        elif initial_xyz_param:
+            # Copy from specific path defined by workflow engine
+            src = Path(initial_xyz_param)
+            if src.exists():
+                shutil.copy(src, job_dir / "inp.xyz")
+                xyz_source = "inp.xyz"
+            else:
+                print(f"Error: Initial XYZ not found at {src}")
+                xyz_source = "inp.xyz" # Fallback, might fail
         elif parent_job:
-            os.system(f"cp {Path(parent_job.working_dir)}/{parent_job.molecule_name}.xyz {job_dir}/inp.xyz")
+            parent_wd = Path(parent_job.working_dir)
+            src_xyz = parent_wd / f"{parent_job.molecule_name}.xyz" # Default
+
+            if parent_job.stage == "neb_ci":
+                src_xyz = parent_wd / f"{parent_job.molecule_name}_NEB-CI_converged.xyz"
+            elif parent_job.stage == "neb_ts":
+                src_xyz = parent_wd / f"{parent_job.molecule_name}_NEB-TS_converged.xyz"
+            elif "Freq" in parent_job.stage or "freq" in parent_job.stage.lower():
+                src_xyz = parent_wd / "inp.xyz"
+
+            if src_xyz.exists():
+                shutil.copy(src_xyz, job_dir / "inp.xyz")
+            else:
+                print(f"Warning: Source XYZ not found at {src_xyz}")
             xyz_source = "inp.xyz"
         else:
             xyz_source = "inp.xyz" # Fallback for root
@@ -212,6 +250,73 @@ def main():
             if key in job.params:
                 return job.params[key]
             return chem.get(key, default)
+
+        # --- Special Logic for NEB (Product Structure) ---
+        product_xyz_name = ""
+        if "neb" in job.stage:
+            # 1. Try dynamic lookup by molecule name (Preferred)
+            product_mol_name = resolve('product_name')
+            found_product = False
+            
+            if product_mol_name:
+                # Find candidate jobs in the manager
+                candidates = [
+                    j for j in manager.jobs.values()
+                    if j.molecule_name == product_mol_name 
+                    and j.status == "completed"
+                ]
+                
+                if candidates:
+                    # Prefer Frequency jobs as they contain the verified geometry in inp.xyz
+                    freq_candidates = [c for c in candidates if "freq" in c.stage.lower()]
+                    pool = freq_candidates if freq_candidates else candidates
+                    
+                    # Try to match functional
+                    current_func = resolve('functional')
+                    func_matches = [c for c in pool if c.params.get('functional') == current_func]
+                    
+                    # Pick best: Match functional > Any from Pool
+                    best_job = func_matches[-1] if func_matches else pool[-1]
+                    
+                    src_path = None
+                    if best_job.results.get('final_xyz'):
+                        src_path = Path(best_job.results['final_xyz'])
+                    else:
+                        src_path = Path(best_job.working_dir) / "inp.xyz"
+
+                    if src_path and src_path.exists():
+                        shutil.copy(src_path, job_dir / "product.xyz")
+                        product_xyz_name = "product.xyz"
+                        found_product = True
+                        print(f"  -> Found product structure from job {best_job.molecule_name} ({best_job.id[:8]})")
+
+            # 2. Fallback to static path if dynamic lookup failed or wasn't requested
+            if not found_product:
+                prod_path_str = resolve('product_xyz')
+                if prod_path_str:
+                    prod_path = (project_root / prod_path_str).resolve()
+                    if prod_path.exists():
+                        shutil.copy(prod_path, job_dir / "product.xyz")
+                        product_xyz_name = "product.xyz"
+                        found_product = True
+                    else:
+                        print(f"Warning: Product XYZ not found at {prod_path}")
+
+            # 3. Synchronization Check
+            # If we expected a product (via name) but didn't find it, we wait.
+            if product_mol_name and not found_product:
+                print(f"  [NEB Hold] Waiting for completed optimization of product '{product_mol_name}'...")
+                continue # Skip submission, check again next cycle
+
+        # --- Special Logic for IRC / OptTS (Hessian from Parent) ---
+        ts_hess_name = ""
+        if ("irc" in job.stage or job.stage == "OptTS") and parent_job:
+            parent_hess = Path(parent_job.working_dir) / f"{parent_job.molecule_name}.hess"
+            if parent_hess.exists():
+                shutil.copy(parent_hess, job_dir / "parent.hess")
+                ts_hess_name = "parent.hess"
+            else:
+                print(f"Warning: Parent Hessian not found at {parent_hess}")
 
         # --- Resource Selection Logic ---
         # 1. Gather candidates (List of Dicts)
@@ -239,6 +344,21 @@ def main():
                     print(f"  -> Routing to {label} (Free: {cluster_status[label]})")
                     break
 
+        # OptTS Parameter Formatting
+        ts_mode_val = resolve('ts_mode')
+        ts_mode_str = f"ts_mode {{ M {ts_mode_val} }}" if ts_mode_val else ""
+
+        recalc_hess_val = resolve('recalc_hess')
+        recalc_hess_str = f"recalc_hess {recalc_hess_val}" if recalc_hess_val else ""
+
+        hybrid_hess_val = resolve('hybrid_hess')
+        hybrid_hess_str = ""
+        if hybrid_hess_val:
+            if isinstance(hybrid_hess_val, list):
+                hybrid_hess_str = f"hybrid_hess {{ {' '.join(map(str, hybrid_hess_val))} }}"
+            else:
+                hybrid_hess_str = f"hybrid_hess {{ {hybrid_hess_val} }}"
+
         context = {
             "molecule_name": job.molecule_name,
             "xyz_coord_fname": xyz_source,
@@ -251,7 +371,19 @@ def main():
             "aux_basis": resolve('aux_basis', 'AutoAux'),
             "solvent_model": resolve('solvation', ''),
             "n_cores": selected_res.get('n_cores', 14),
-            "mem_per_core": selected_res.get('mem_per_core', '13000')
+            "mem_per_core": selected_res.get('mem_per_core', '13000'),
+            # TDDFT / Excited State Defaults
+            "nroots": resolve('nroots', 30),
+            "triplets": resolve('triplets', 'false'),
+            "tda": resolve('tda', 'true'),
+            "dosoc": resolve('dosoc', 'false'),
+            "iroot": resolve('iroot', 1),
+            # NEB / IRC Files
+            "product_xyz_coord_fname": product_xyz_name,
+            "ts_hess_fname": ts_hess_name,
+            "ts_mode": ts_mode_str,
+            "recalc_hess": recalc_hess_str,
+            "hybrid_hess": hybrid_hess_str,
         }
         
         # Render

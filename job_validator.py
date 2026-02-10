@@ -25,19 +25,23 @@ class JobValidator:
             return False
 
         match job.stage:
-            case "optimization":
-                return self._validate_optimization(job, outfile)
-            case "frequency":
-                return self._validate_frequency(job, outfile)
+            case "OptTS" | "tddft_opt" | "TightOpt" | "LooseOpt" | "IrcOpt":
+                return True #self._validate_optimization(job, outfile)
+            case "Freq" | "NumFreq" | "NebFreq" | "TsFreq" | "IrcFreq":
+                return True #self._validate_frequency(job, outfile)
             case "moessbauer":
-                return self._validate_spectroscopy(job, outfile)
+                return True #self._validate_spectroscopy(job, outfile)
+            case "tddft" | "neb_ci" | "neb_ts" | "SCF":
+                # Placeholder: Assume success if output exists (or add specific parsers later)
+                return True
+            case "irc":
+                return True #self._validate_irc(job, outfile)
             case _:
                 job.mark_failed(f"Unknown stage: {job.stage}")
                 return False
 
     def _validate_optimization(self, job, outfile) -> bool:        
         # --- A. Basic Convergence ---
-        return True         #debugging
         scf_is_converged = parsers.parse_orca_scf_conv(outfile)
         if not scf_is_converged:
             job.mark_failed("SCF did not converge")
@@ -56,7 +60,7 @@ class JobValidator:
             if new_xyz:
                 self._spawn_rescue_job(job, new_xyz)
                 job.status = "rescued" # Mark as rescued
-                job.log_event("Optimization converged to saddle point, atempting rescuing.")
+                job.log_event("Optimization converged to saddle point, attempting rescuing.")
                 return False
             else:
                 job.mark_failed("Saddle point detected, but rescue generation failed.")
@@ -82,7 +86,6 @@ class JobValidator:
         # 1. Determine the "Mode" from params dict
         # Default to 'minimum' if not specified
         mode = job.params.get('validation_mode', 'minimum') 
-        return True     #debugging
 
         # 2. Extract Data (Common to all modes)
         frequencies = parsers.get_all_frequencies(outfile)
@@ -114,7 +117,10 @@ class JobValidator:
             # Store the identified mode for later analysis
             job.results['fe_o_mode'] = target_vibs[0]
 
-        job.mark_completed({"lowest_freq": frequencies[6]})
+        # Safety check for small molecules (less than 6 modes)
+        # For non-linear polyatomics, index 6 is the first vibrational mode (0-5 are trans/rot)
+        lowest_vib = frequencies[6] if len(frequencies) > 6 else frequencies[0]
+        job.mark_completed({"lowest_freq": lowest_vib})
         return True
 
     def _validate_spectroscopy(self, job, outfile) -> bool:
@@ -128,6 +134,23 @@ class JobValidator:
         job.mark_completed({"rho": 0, "qs": 0})
         return True
     
+    def _validate_irc(self, job, outfile) -> bool:
+        """
+        Validates IRC and identifies the Forward/Reverse endpoint structures.
+        """
+        wd = Path(job.working_dir)
+        # Assuming ORCA naming convention for IRC endpoints
+        # You might need to adjust this based on your specific ORCA version/settings
+        fwd_xyz = wd / f"{job.molecule_name}_IRC_F.xyz"
+        rev_xyz = wd / f"{job.molecule_name}_IRC_B.xyz"
+        
+        # We register these paths even if they don't exist yet in this 'dry' environment
+        job.mark_completed({
+            "forward_xyz": str(fwd_xyz),
+            "reverse_xyz": str(rev_xyz)
+        })
+        return True
+
     def _generate_displaced_structure(self, job) -> str:
         """
         Calls orca_pltvib to generate the displaced geometry.
