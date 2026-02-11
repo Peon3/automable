@@ -7,10 +7,10 @@
 
 %geom
 inhess read
-inhessname {{ ts_hess_fname }}
-{{ ts_mode }}           #ts_mode { M # }
-{{ recalc_hess }}       #recalc_hess #
-{{ hybrid_hess }}       #hybrid_hess { # # # # }
+inhessname "{{ ts_hess_fname }}"
+{{ ts_mode }}           #ts_mode
+{{ recalc_hess }}       #recalc_hess
+{{ hybrid_hess }}       #hybrid_hess
 end
 
 %pal 
