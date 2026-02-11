@@ -29,9 +29,8 @@ def _spawn_child_job(parent_job: 'Job', step_config: dict, folder_name: str, new
         pipeline_profile=profile_name
     )
 
-    # The working directory for a child is relative to the parent's parent directory
-    # e.g., work/pipeline/mol/stage_1 -> work/pipeline/mol/stage_2
-    new_working_dir = Path(parent_job.working_dir).parent / folder_name
+    # The working directory for a child is a subdirectory of the parent's working directory.
+    new_working_dir = Path(parent_job.working_dir) / folder_name
     new_job.working_dir = str(new_working_dir)
 
     # --- Parameter Inheritance Logic (from old WorkflowEngine) ---
@@ -290,6 +289,11 @@ class SpecialContextJob(Job):
     def get_submission_context(self, manager: 'StateManager', config: dict, project_root: Path) -> Dict[str, Any]:
         context = super().get_submission_context(manager, config, project_root)
         def resolve(key, default=None): return self.params.get(key, default)
+
+        # Initialize OptTS-specific keys to empty strings to prevent Jinja errors
+        context['ts_mode'] = ""
+        context['recalc_hess'] = ""
+        context['hybrid_hess'] = ""
 
         # Logic for NEB product structure
         if "neb" in self.stage:
