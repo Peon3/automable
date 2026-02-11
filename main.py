@@ -5,12 +5,12 @@ import os
 import shutil
 from pathlib import Path
 
-# Import our custom classes (assumed to be in separate files)
-from state_manager import StateManager, Job
+# Import our custom classes
+from state_manager import StateManager
 from cluster_interface import ClusterInterface
-from job_validator import JobValidator
-from workflow_engine import WorkflowEngine
 from template_manager import TemplateManager
+from jobs import job_factory
+import utils
 
 def scan_inputs(project_root: Path, manager: StateManager, config: dict):
     """
@@ -99,11 +99,10 @@ def scan_inputs(project_root: Path, manager: StateManager, config: dict):
                 # Copy input file to standard name 'inp.xyz' expected by the submitter
                 shutil.copy(xyz_file, work_dir / "inp.xyz")
                 
-                # Create and register the Root Job
-                new_job = Job(
-                    molecule_name=mol_name,
+                # Create and register the Root Job using the factory
+                new_job = job_factory(
                     stage=start_stage,
-                    parent_id=None, # Root job has no parent
+                    molecule_name=mol_name,
                     working_dir=str(work_dir),
                     pipeline_profile=profile_name
                 )
@@ -128,8 +127,6 @@ def main():
     # Initialize Modules
     manager = StateManager(project_root / "state.json")
     cluster = ClusterInterface(remote_host, username)
-    validator = JobValidator(config, manager)
-    workflow = WorkflowEngine(manager, config)
     templater = TemplateManager(Path(__file__).resolve().parent / "templates")
 
     # Mapping abstract stages to concrete template files
@@ -171,13 +168,12 @@ def main():
     
     for job in jobs_to_parse:
         print(f"Validating {job.molecule_name}, {job.params.get('functional')}...")
-        success = validator.validate(job) # Returns True/False, updates job.results
+        # The validation logic is now inside the job object itself
+        success = job.validate(manager)
         
         if success:
-            job.status = "completed" 
-            # Note: We don't save immediately, we batch save at the end
+            job.mark_completed({}) # Mark as completed if not already done by a specific validator
         else:
-            # Validator already marked it as 'failed' inside the object
             print(f"Job {job.molecule_name} FAILED validation.")
 
     # --- 4. Transition (Spawn Children) ---
@@ -186,7 +182,7 @@ def main():
     completed_jobs = manager.get_jobs_by_status("completed")
     for job in completed_jobs:
         if not job.children_spawned:
-            workflow.transition_job(job)
+            job.spawn_children(manager, config.get('pipelines', {}))
             job.children_spawned = True # Mark so we don't spawn duplicates next cycle
 
     # --- 5. Submit (The Actuator) ---
@@ -204,195 +200,36 @@ def main():
         job_dir = Path(job.working_dir)
         job_dir.mkdir(parents=True, exist_ok=True) # exist_ok=True because Rescue jobs already created this dir
         
-        # B. Generate Input (Jinja2)
-        # Fetch parent for coordinates/orbitals if needed
+        # B. Determine input geometry source
         parent_job = manager.get_job_by_id(job.parent_id) if job.parent_id else None
+        xyz_source = "inp.xyz" # Standard name for the input geometry
+        if not (job_dir / xyz_source).exists():
+            if initial_xyz := job.params.get('initial_xyz'):
+                shutil.copy(initial_xyz, job_dir / xyz_source)
+            elif parent_job and (final_xyz := parent_job.results.get('final_xyz')):
+                 shutil.copy(final_xyz, job_dir / xyz_source)
+            elif parent_job and (parent_inp := Path(parent_job.working_dir) / xyz_source).exists():
+                 shutil.copy(parent_inp, job_dir / xyz_source)
+
+        # C. Get context for Jinja2 template
+        context = job.get_submission_context(manager, config, project_root)
+        context['xyz_coord_fname'] = xyz_source
+
+        # Check if a special job type signaled a hold
+        if context.pop('_hold_submission', False):
+            print(f"  [HOLD] Waiting for dependencies for job {job.molecule_name}...")
+            continue
+
+        # D. Select resources and add to context
+        selected_res = utils.select_best_resource(job, config, cluster_status)
+        context['n_cores'] = selected_res.get('n_cores', 14)
+        context['mem_per_core'] = selected_res.get('mem_per_core', '13000')
         
-        # Check if the job has a specific start structure defined (e.g. IRC split)
-        initial_xyz_param = job.params.get('initial_xyz')
-        
-        # Determine XYZ source: Prefer local 'input.xyz' (Rescue jobs), else Parent
-        if (job_dir / "inp.xyz").exists():
-            xyz_source = "inp.xyz"
-        elif initial_xyz_param:
-            # Copy from specific path defined by workflow engine
-            src = Path(initial_xyz_param)
-            if src.exists():
-                shutil.copy(src, job_dir / "inp.xyz")
-                xyz_source = "inp.xyz"
-            else:
-                print(f"Error: Initial XYZ not found at {src}")
-                xyz_source = "inp.xyz" # Fallback, might fail
-        elif parent_job:
-            parent_wd = Path(parent_job.working_dir)
-            src_xyz = parent_wd / f"{parent_job.molecule_name}.xyz" # Default
-
-            if parent_job.stage == "neb_ci":
-                src_xyz = parent_wd / f"{parent_job.molecule_name}_NEB-CI_converged.xyz"
-            elif parent_job.stage == "neb_ts":
-                src_xyz = parent_wd / f"{parent_job.molecule_name}_NEB-TS_converged.xyz"
-            elif "Freq" in parent_job.stage or "freq" in parent_job.stage.lower():
-                src_xyz = parent_wd / "inp.xyz"
-
-            if src_xyz.exists():
-                shutil.copy(src_xyz, job_dir / "inp.xyz")
-            else:
-                print(f"Warning: Source XYZ not found at {src_xyz}")
-            xyz_source = "inp.xyz"
-        else:
-            xyz_source = "inp.xyz" # Fallback for root
-
-        # Context building
-        chem = config['chemistry']
-
-        # Helper to resolve param: Job Param > Global Config > Default
-        def resolve(key, default=None):
-            if key in job.params:
-                return job.params[key]
-            return chem.get(key, default)
-
-        # --- Special Logic for NEB (Product Structure) ---
-        product_xyz_name = ""
-        if "neb" in job.stage:
-            # 1. Try dynamic lookup by molecule name (Preferred)
-            product_mol_name = resolve('product_name')
-            found_product = False
-            
-            if product_mol_name:
-                # Find candidate jobs in the manager
-                candidates = [
-                    j for j in manager.jobs.values()
-                    if j.molecule_name == product_mol_name 
-                    and j.status == "completed"
-                ]
-                
-                if candidates:
-                    # Prefer Frequency jobs as they contain the verified geometry in inp.xyz
-                    freq_candidates = [c for c in candidates if "freq" in c.stage.lower()]
-                    pool = freq_candidates if freq_candidates else candidates
-                    
-                    # Try to match functional
-                    current_func = resolve('functional')
-                    func_matches = [c for c in pool if c.params.get('functional') == current_func]
-                    
-                    # Pick best: Match functional > Any from Pool
-                    best_job = func_matches[-1] if func_matches else pool[-1]
-                    
-                    src_path = None
-                    if best_job.results.get('final_xyz'):
-                        src_path = Path(best_job.results['final_xyz'])
-                    else:
-                        src_path = Path(best_job.working_dir) / "inp.xyz"
-
-                    if src_path and src_path.exists():
-                        shutil.copy(src_path, job_dir / "product.xyz")
-                        product_xyz_name = "product.xyz"
-                        found_product = True
-                        print(f"  -> Found product structure from job {best_job.molecule_name} ({best_job.id[:8]})")
-
-            # 2. Fallback to static path if dynamic lookup failed or wasn't requested
-            if not found_product:
-                prod_path_str = resolve('product_xyz')
-                if prod_path_str:
-                    prod_path = (project_root / prod_path_str).resolve()
-                    if prod_path.exists():
-                        shutil.copy(prod_path, job_dir / "product.xyz")
-                        product_xyz_name = "product.xyz"
-                        found_product = True
-                    else:
-                        print(f"Warning: Product XYZ not found at {prod_path}")
-
-            # 3. Synchronization Check
-            # If we expected a product (via name) but didn't find it, we wait.
-            if product_mol_name and not found_product:
-                print(f"  [NEB Hold] Waiting for completed optimization of product '{product_mol_name}'...")
-                continue # Skip submission, check again next cycle
-
-        # --- Special Logic for IRC / OptTS (Hessian from Parent) ---
-        ts_hess_name = ""
-        if ("irc" in job.stage or job.stage == "OptTS") and parent_job:
-            parent_hess = Path(parent_job.working_dir) / f"{parent_job.molecule_name}.hess"
-            if parent_hess.exists():
-                shutil.copy(parent_hess, job_dir / "parent.hess")
-                ts_hess_name = "parent.hess"
-            else:
-                print(f"Warning: Parent Hessian not found at {parent_hess}")
-
-        # --- Resource Selection Logic ---
-        # 1. Gather candidates (List of Dicts)
-        # Check job.params['resources'] first, then config['resources']
-        res_input = job.params.get('resources')
-        if not res_input:
-            res_input = config.get('resources', {})
-            
-        # Normalize to list
-        if isinstance(res_input, dict):
-            res_candidates = [res_input]
-        elif isinstance(res_input, list):
-            res_candidates = res_input
-        else:
-            res_candidates = [{'n_cores': 32, 'mem_per_core': 13000}] # Fallback
-
-        # 2. Select best candidate
-        selected_res = res_candidates[0] # Default to first
-        
-        if len(res_candidates) > 1:
-            for cand in res_candidates:
-                label = cand.get('node_label')
-                if label and cluster_status.get(label, 0) > 0:
-                    selected_res = cand
-                    print(f"  -> Routing to {label} (Free: {cluster_status[label]})")
-                    break
-
-        # OptTS Parameter Formatting
-        ts_mode_val = resolve('ts_mode')
-        ts_mode_str = f"ts_mode {{ M {ts_mode_val} }}" if ts_mode_val else ""
-
-        recalc_hess_val = resolve('recalc_hess')
-        recalc_hess_str = f"recalc_hess {recalc_hess_val}" if recalc_hess_val else ""
-
-        hybrid_hess_val = resolve('hybrid_hess')
-        hybrid_hess_str = ""
-        if hybrid_hess_val:
-            if isinstance(hybrid_hess_val, list):
-                hybrid_hess_str = f"hybrid_hess {{ {' '.join(map(str, hybrid_hess_val))} }}"
-            else:
-                hybrid_hess_str = f"hybrid_hess {{ {hybrid_hess_val} }}"
-
-        context = {
-            "molecule_name": job.molecule_name,
-            "xyz_coord_fname": xyz_source,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "charge": resolve('charge', 0),
-            "multiplicity": resolve('multiplicity', 1),
-            "functional": resolve('functional', 'r2scan-3c'),
-            "basis_set": resolve('basis_set', ''),
-            "dispersion": resolve('dispersion', ''),
-            "aux_basis": resolve('aux_basis', 'AutoAux'),
-            "solvent_model": resolve('solvation', ''),
-            "n_cores": selected_res.get('n_cores', 14),
-            "mem_per_core": selected_res.get('mem_per_core', '13000'),
-            # TDDFT / Excited State Defaults
-            "nroots": resolve('nroots', 30),
-            "triplets": resolve('triplets', 'false'),
-            "tda": resolve('tda', 'true'),
-            "dosoc": resolve('dosoc', 'false'),
-            "iroot": resolve('iroot', 1),
-            # NEB / IRC Files
-            "product_xyz_coord_fname": product_xyz_name,
-            "ts_hess_fname": ts_hess_name,
-            "ts_mode": ts_mode_str,
-            "recalc_hess": recalc_hess_str,
-            "hybrid_hess": hybrid_hess_str,
-        }
-        
-        # Render
+        # E. Render and Submit
         inp_name = f"{job.molecule_name}.inp"
         template_name = template_map.get(job.stage, f"{job.stage}.inp.j2")
         templater.render_and_write(template_name, job_dir / inp_name, context)
         
-        # C. Submit
-        # We submit a standardized script that calls the input
         pbs_id = cluster.submit_job(str(job_dir), 'suborca.py', inp_name)
         
         if pbs_id:
