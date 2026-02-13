@@ -16,17 +16,29 @@ if TYPE_CHECKING:
 
 def _spawn_child_job(parent_job: 'Job', step_config: dict, folder_name: str, new_mol_name: str,
                      manager: 'StateManager', pipelines: dict, extra_params: Optional[dict] = None):
+                     manager: 'StateManager', pipelines: dict, new_pipeline_step: str,
+                     extra_params: Optional[dict] = None):
     """Helper to create and register a child job."""
     profile_name = parent_job.pipeline_profile
     roadmap = pipelines.get(profile_name, {})
     new_stage = step_config['stage']
 
+    # Get the rules for the new step and determine the actual job type (e.g., 'TightOpt')
+    target_step_rules = roadmap.get(new_pipeline_step, {})
+    job_type = target_step_rules.get('type')
+    if not job_type:
+        print(f"ERROR: Pipeline step '{new_pipeline_step}' in '{profile_name}' is missing a 'type' definition.")
+        return
+
     # Use the factory to create an instance of the correct Job subclass for the new stage.
     new_job = job_factory(
         stage=new_stage,
+        stage=job_type,  # The job type (e.g., 'TightOpt') determines the class
         molecule_name=new_mol_name,
         parent_id=parent_job.id,
         pipeline_profile=profile_name
+        pipeline_profile=profile_name,
+        pipeline_step=new_pipeline_step  # The unique name for this step in the workflow
     )
 
     # The working directory for a child is a subdirectory of the parent's working directory.
@@ -34,11 +46,14 @@ def _spawn_child_job(parent_job: 'Job', step_config: dict, folder_name: str, new
     new_job.working_dir = str(new_working_dir)
 
     # --- Parameter Inheritance Logic (from old WorkflowEngine) ---
+    # --- Parameter Inheritance Logic ---
     # 1. Inherit all parameters from parent
     new_job.params = parent_job.params.copy()
     # 2. Apply overrides defined for the new stage in the pipeline roadmap
     target_stage_rules = roadmap.get(new_stage, {})
     stage_overrides = {k: v for k, v in target_stage_rules.items() if k != 'next_steps'}
+    # 2. Apply overrides defined for the new pipeline step in the roadmap
+    stage_overrides = {k: v for k, v in target_step_rules.items() if k not in ['next_steps', 'type']}
     new_job.params.update(stage_overrides)
     # 3. Apply overrides from the specific 'next_steps' entry in the parent's config
     step_overrides = {k: v for k, v in step_config.items() if k not in ['stage', 'folder', 'neb_pairs']}
@@ -69,6 +84,7 @@ class Job:
             self.history: List[str] = job_data['history']
             self.children_spawned: bool = job_data.get('children_spawned', False)
             self.pipeline_profile: Optional[str] = job_data.get('pipeline_profile')
+            self.pipeline_step: Optional[str] = job_data.get('pipeline_step')
             self.params: Dict[str, Any] = job_data.get('params', {})
         else:
             molecule_name = kwargs.get('molecule_name')
@@ -86,6 +102,7 @@ class Job:
             self.history = []
             self.children_spawned = False
             self.pipeline_profile = kwargs.get('pipeline_profile')
+            self.pipeline_step = kwargs.get('pipeline_step')
             self.params = {}
             self.log_event(f"Job created for stage: {stage}")
 
@@ -114,6 +131,7 @@ class Job:
             "status": self.status, "parent_id": self.parent_id, "pbs_id": self.pbs_id,
             "working_dir": self.working_dir, "results": self.results, "history": self.history,
             "children_spawned": self.children_spawned, "pipeline_profile": self.pipeline_profile,
+            "children_spawned": self.children_spawned, "pipeline_profile": self.pipeline_profile, "pipeline_step": self.pipeline_step,
             "params": self.params
         }
 
@@ -131,9 +149,14 @@ class Job:
         profile_name = self.pipeline_profile
         roadmap = pipelines.get(profile_name)
         if not roadmap or not (current_stage_rules := roadmap.get(self.stage)):
+        # The key for the rules is the unique pipeline step name, not the job type/stage.
+        if not roadmap or not self.pipeline_step or not (current_step_rules := roadmap.get(self.pipeline_step)):
             return
 
         for step in current_stage_rules.get('next_steps', []):
+        for step in current_step_rules.get('next_steps', []):
+            # The 'stage' in the config now refers to the next unique pipeline step name.
+            next_step_name = step['stage']
             if 'neb_pairs' in step:
                 for match in (p for p in step['neb_pairs'] if p['reactant'] == self.molecule_name):
                     product_name = match['product']
@@ -141,9 +164,11 @@ class Job:
                     _spawn_child_job(
                         self, step, f"{step['folder']}{suffix}", f"{self.molecule_name}{suffix}",
                         manager, pipelines, extra_params={'product_name': product_name}
+                        manager, pipelines, new_pipeline_step=next_step_name, extra_params={'product_name': product_name}
                     )
             else:
                 _spawn_child_job(self, step, step['folder'], self.molecule_name, manager, pipelines)
+                _spawn_child_job(self, step, step['folder'], self.molecule_name, manager, pipelines, new_pipeline_step=next_step_name)
 
     def get_submission_context(self, manager: 'StateManager', config: dict, project_root: Path) -> Dict[str, Any]:
         """Prepares the Jinja2 context dictionary for rendering the input file."""
@@ -275,13 +300,24 @@ class IRCJob(Job):
         profile_name = self.pipeline_profile
         roadmap = pipelines.get(profile_name)
         if not roadmap or not (rules := roadmap.get(self.stage)): return
+        if not roadmap or not self.pipeline_step or not (rules := roadmap.get(self.pipeline_step)): return
 
         for step in rules.get('next_steps', []):
             if 'Opt' in step['stage']:
                 _spawn_child_job(self, step, f"{step['folder']}_Fwd", f"{self.molecule_name}_Fwd", manager, pipelines, {'initial_xyz': fwd})
                 _spawn_child_job(self, step, f"{step['folder']}_Rev", f"{self.molecule_name}_Rev", manager, pipelines, {'initial_xyz': rev})
+            next_step_name = step['stage']
+            target_step_rules = roadmap.get(next_step_name, {})
+            job_type = target_step_rules.get('type', '')
+
+            # If the next step is an optimization, spawn two jobs (forward and reverse)
+            if 'Opt' in job_type:
+                _spawn_child_job(self, step, f"{step['folder']}_Fwd", f"{self.molecule_name}_Fwd", manager, pipelines, new_pipeline_step=next_step_name, extra_params={'initial_xyz': fwd})
+                _spawn_child_job(self, step, f"{step['folder']}_Rev", f"{self.molecule_name}_Rev", manager, pipelines, new_pipeline_step=next_step_name, extra_params={'initial_xyz': rev})
             else:
                 super().spawn_children(manager, pipelines) # Fallback for non-opt children
+                # For any other type of child, just spawn one.
+                _spawn_child_job(self, step, step['folder'], self.molecule_name, manager, pipelines, new_pipeline_step=next_step_name)
 
 
 class SpecialContextJob(Job):

@@ -1,17 +1,17 @@
 from abc import ABC, abstractmethod
-from typing import List, Any
+from typing import List, Dict, Any
 
 class PostValidator(ABC):
     """
-    Strategy for Validator, does all kinds of job validation w.r.t. results
+    Strategy pattern, valdiates in place, returns bool
     """
     @abstractmethod
-    def post_validate(self, job_results: dict) -> bool:
+    def postValidate(self, job_results: dict) -> bool:
         pass
 
 class Analyzer(ABC):
     """
-    Strategy for Analyzer, does  all kinds of analysis
+    Strategy pattern, idea is that it produces files with prepared data and/or executables that produce images. TODO: implement
     """
     @abstractmethod
     def analyze(self, job_data: Any) -> Any:
@@ -19,15 +19,16 @@ class Analyzer(ABC):
 
 class ErrorHandler(ABC):
     """
-    Strategy for ErrorHandler, does error thingies
+    Strategy pattern, tries to fix things with e.g. spawning a rescue job or alike, has to return bool (and sometimes (rescue) job object?)
     """
     @abstractmethod
+    #def handle(self, job_data: Any) -> List[bool, Any]:
     def handle(self, job_data: Any) -> bool:
         pass
 
 class ChildSpawner(ABC):
     """
-    Strategy for ChildSpawner, supposed to spawn child calulations
+    Strategy pattern, spwans child calculations and returns a list of job objects. TODO: implement
     """
     @abstractmethod
     def spawn(self, job_data: Any) -> List[Any]:
@@ -38,7 +39,7 @@ class PreValidator(ABC):
     Strategy for pre calculation checks e.g. sanity 
     """
     @abstractmethod
-    def pre_validate(self, job_data: Any) -> bool:
+    def preValidate(self, job_data: Any) -> bool:
         pass
 
 class PreCalcSoftFixer(ABC):
@@ -46,7 +47,7 @@ class PreCalcSoftFixer(ABC):
     Strategy for some selfhealing mechanisms, if explicilty called in input, never should be default. TODO: implement
     """
     @abstractmethod
-    def self_heal(self, job_data: Any) -> bool:
+    def selfHeal(self, job_data: Any) -> bool:
         pass
 
 class PreCalcManager:
@@ -58,7 +59,7 @@ class PreCalcManager:
     def run(self, job_data: dict) -> bool:
         is_validated = True
         for t in self.tests:
-            if not t.pre_validate(job_data):
+            if not t.preValidate(job_data):
                 print(f"--- Pre calc validation failed with {t.__class__.__name__} ---")
                 is_validated = False
                 break
@@ -84,7 +85,7 @@ class PostCalcManager:
     def run(self, job_data: dict) -> bool:
         is_validated = True
         for v in self.post_validators:
-            if not v.post_validate(job_data):
+            if not v.postValidate(job_data):
                 print(f"--- Post calc validation failed with {v.__class__.__name__} ---")
                 handler = self.error_handlers.get(v.__class__.__name__)
                 if handler and handler.handle(job_data):

@@ -1,0 +1,108 @@
+# project_config.yaml
+
+# 1. Global Hardware / Resource Settings
+resources:
+  host: "rigi"
+  username: "lege"
+  n_cores: 14 # Default number of cores
+  mem_per_core: 13000 # MB, Default memory per core
+  max_concurrent_jobs: 100
+  
+# 2. Chemistry Defaults
+chemistry:
+  charge: 0
+  multiplicity: 1 # Default, can be overridden by job_data
+  functional: ["BP86", "B3LYP"] # List of functionals to run for each input
+  basis_set: "def2-SVP"
+  dispersion: "D3BJ"
+  aux_basis: "def2/J"
+  solvation: "CPCM(WATER)" # Example global solvation model
+  
+  # Global TDDFT / Excited State Defaults
+  nroots: 10
+  triplets: "false"
+  tda: "true"
+  dosoc: "false"
+  iroot: 1
+
+# 3. The Pipelines (The "different treatments")
+pipelines:
+  # --- Pipeline for the Reactant side of a complex NEB -> IRC workflow ---
+  # To use: place 'MyReactant.xyz' in 'inputs/neb_reactant_path/'
+  neb_reactant_path:
+    # 1. Optimize the reactant structure to a stable minimum.
+    01_Reactant_Opt:
+      type: TightOpt
+      next_steps:
+        - stage: 02_Reactant_Freq
+          folder: "01_Reactant_Freq"
+
+    # 2. Confirm the reactant is a minimum and generate its Hessian.
+    02_Reactant_Freq:
+      type: Freq
+      params:
+        validation_mode: "minimum"
+      next_steps:
+        # This is the MERGE step. It will spawn an NEB job.
+        - stage: 03_NEB_Merge
+          folder: "02_NEB"
+          params:
+            n_images: 10
+            # The 'neb_pairs' key tells the engine to look for a completed 'MyProduct' job
+            # before spawning this 'neb_ci' job.
+            neb_pairs:
+              - reactant: "MyReactant"
+                product: "MyProduct"
+
+    # 3. Run the NEB calculation between the optimized reactant and product.
+    03_NEB_Merge:
+      type: neb_ci # Assumes the job class can find the highest energy image for the next step
+      next_steps:
+        - stage: 04_OptTS_from_NEB
+          folder: "03_OptTS"
+
+    # 4. Take the TS guess from the NEB and perform a true TS optimization.
+    04_OptTS_from_NEB:
+      type: OptTS
+      next_steps:
+        - stage: 05_Freq_TS
+          folder: "04_TS_Freq"
+
+    # 5. Validate that the optimized TS is a true saddle point (1 imaginary frequency).
+    05_Freq_TS:
+      type: Freq
+      params:
+        validation_mode: "transition_state"
+      next_steps:
+        - stage: 06_IRC_Follow
+          folder: "05_IRC"
+
+    # 6. Follow the reaction path down from the TS to the reactant and product wells.
+    06_IRC_Follow:
+      type: irc # The 'irc' job type has special logic to spawn TWO children.
+      next_steps:
+        # This is the SPLIT step. Both children will use this configuration.
+        - stage: 07_Opt_IRC_Endpoints
+          folder: "06_IRC_Opt"
+
+    # 7. Re-optimize the final structures from the IRC calculation.
+    07_Opt_IRC_Endpoints:
+      type: TightOpt
+      next_steps:
+        - stage: 08_Freq_IRC_Endpoints
+          folder: "07_IRC_Freq"
+
+    # 8. Final frequency check to confirm the IRC endpoints are stable minima.
+    08_Freq_IRC_Endpoints:
+      type: Freq
+      params:
+        validation_mode: "minimum"
+      next_steps: [] # Leaf node
+
+  # --- Pipeline for the Product side ---
+  # This is a simple optimization that provides the target structure for the NEB merge.
+  # To use: place 'MyProduct.xyz' in 'inputs/product_opt_only/'
+  product_opt_only:
+    01_Product_Opt:
+      type: TightOpt
+      next_steps: [] # Leaf node

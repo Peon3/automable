@@ -4,6 +4,7 @@ import yaml
 import os
 import shutil
 from pathlib import Path
+from typing import List, Dict, Any
 
 # Import our custom classes
 from state_manager import StateManager
@@ -119,7 +120,10 @@ def main():
     
     # Load Config
     with open(project_root / "config.yaml") as f:
-        config = yaml.safe_load(f)
+        config: Dict[str, Dict] = yaml.safe_load(f)
+
+    print(config)
+    exit()
 
     remote_host = config.get('resources').get('remote_host', 'rigi')
     username = config.get('resources').get('username', '')
