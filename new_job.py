@@ -1,105 +1,99 @@
-from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from enum import Enum
+import uuid
+from .new_calcManagers import PreCalcManager, CalcSetuper, PostCalcManager
 
-class PostValidator(ABC):
-    """
-    Strategy pattern, valdiates in place, returns bool
-    """
-    @abstractmethod
-    def postValidate(self, job_results: dict) -> bool:
-        pass
+class RegJobStatus(str, Enum):
+    PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    RUNNING = "RUNNING"
+    PARSING_NEEDED = "PARSING_NEEDED"
+    HUMAN_INTERVENTION_NEEDED = "HUMAN_INTERVENTION_NEEDED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
-class Analyzer(ABC):
+class Job:
     """
-    Strategy pattern, idea is that it produces files with prepared data and/or executables that produce images. TODO: implement
+    Docstring for Job
     """
-    @abstractmethod
-    def analyze(self, job_data: Any) -> Any:
-        pass
+    def __init__(self, stage: str, preCalcManager: PreCalcManager, calcSetup: CalcSetuper, postCalcManager: PostCalcManager, **kwargs):
+        job_data: Optional[dict] = kwargs.get('job_data')
+        if job_data:
+            # State
+            self.id: str = job_data['id']
+            self.molecule_name: str = job_data['molecule_name']
+            self.status: str = job_data['status']
+            self.parent_id: Optional[str] = job_data['parent_id']
+            self.queue_id: Optional[str] = job_data['queue_id']
+            self.working_dir: Optional[str] = job_data['working_dir']
+            self.results: Dict[str, Any] = job_data['results']
+            self.history: List[str] = job_data['history']
+            self.children_spawned: bool = job_data.get('children_spawned', False)
+            self.pipeline_profile: Optional[str] = job_data.get('pipeline_profile')
+            self_pipeline_step: Optional[str] = job_data.get('pipeline_step')
+            self.params: Dict[str, Any] = job_data.get('params', {})
 
-class ErrorHandler(ABC):
-    """
-    Strategy pattern, tries to fix things with e.g. spawning a rescue job or alike, has to return bool (and sometimes (rescue) job object?)
-    """
-    @abstractmethod
-    #def handle(self, job_data: Any) -> List[bool, Any]:
-    def handle(self, job_data: Any) -> bool:
-        pass
+            # Strategies
+            self.preCalcManager = preCalcManager
+            self.calcSetup = calcSetup
+            self.postCalcManager = postCalcManager
 
-class ChildSpawner(ABC):
-    """
-    Strategy pattern, spwans child calculations and returns a list of job objects. TODO: implement
-    """
-    @abstractmethod
-    def spawn(self, job_data: Any) -> List[Any]:
-        pass
+        else:
+            molecule_name = kwargs.get('molecule_name')
+            if not molecule_name:
+                raise ValueError("molecule_name is required when creating a new job.")
 
-class PreValidator(ABC):
-    """
-    Strategy for pre calculation checks e.g. sanity 
-    """
-    @abstractmethod
-    def preValidate(self, job_data: Any) -> bool:
-        pass
-
-class PreCalcSoftFixer(ABC):
-    """
-    Strategy for some selfhealing mechanisms, if explicilty called in input, never should be default. TODO: implement
-    """
-    @abstractmethod
-    def selfHeal(self, job_data: Any) -> bool:
-        pass
-
-class PreCalcManager:
-    def __init__(self,
-                 tests: List[PreValidator] = None):
-        
-        self.tests = tests or []
+            self.id = str(uuid.uuid4())
+            self.molecule_name = molecule_name
+            self.stage = stage
+            self.status = "PENDING"
+            self.parent_id = kwargs.get('parent_id')
+            self.queue_id = None
+            self.working_dir = kwargs.get('working_dir')
+            self.results = {}
+            self.history = []
+            self.children_spawned = False
+            self.pipeline_profile = kwargs.get('pipeline_profile')
+            self.pipeline_step = kwargs.get('pipeline_step')
+            self.params = {}
+            self.log_event(f"Job created for stage: {stage}")
     
-    def run(self, job_data: dict) -> bool:
-        is_validated = True
-        for t in self.tests:
-            if not t.preValidate(job_data):
-                print(f"--- Pre calc validation failed with {t.__class__.__name__} ---")
-                is_validated = False
-                break
-        
-        if is_validated:
-            print(f"--- Pre calc validation succesfull ---")
+            # Strategies
+            self.preCalcManager = preCalcManager
+            self.calcSetup = calcSetup
+            self.postCalcManager = postCalcManager
 
-        return is_validated
+    def rehydrate(self, job_data: dict):
+        pass
+
+    def dehydrate(self, job_data: dict):
+        pass
+
+    def preCalc(self) -> bool:
+        return self.preCalcManager.run(self.job_data)
+
+    def calcSetup(self) -> bool:
+        return self.calcSetup.run(self.job_data)
+
+    def postCalc(self) -> bool:
+        return self.postCalcManager.run(self.job_data)
 
 
-class PostCalcManager:
-    def __init__(self,
-                 post_validators: List[PostValidator] = None,
-                 analyzers: List[Analyzer] = None,
-                 error_handlers: List[ErrorHandler] = None,
-                 child_spawners: List[ChildSpawner] = None
-                 ):
-        self.post_validators = post_validators or []
-        self.analyzers = analyzers or []
-        self.error_handlers: dict[str, ErrorHandler] = {h.__class__.__name__: h for h in (error_handlers or [])}
-        self.child_spawners = child_spawners or []
 
-    def run(self, job_data: dict) -> bool:
-        is_validated = True
-        for v in self.post_validators:
-            if not v.postValidate(job_data):
-                print(f"--- Post calc validation failed with {v.__class__.__name__} ---")
-                handler = self.error_handlers.get(v.__class__.__name__)
-                if handler and handler.handle(job_data):
-                    print(f"--- Error handler {handler.__class__.__name__} successful ---")
-                    continue 
-                is_validated = False
-                break
-        
-        if is_validated:
-            print(f"--- Post calc validation succesfull ---")
 
-            for a in self.analyzers:
-                a.analyze(job_data)
-            for c in self.child_spawners:
-                c.spawn(job_data)
 
-        return is_validated
+class JobFactory:
+    """
+    Docstring for JobFactory
+    """
+    def __init__(self, parser: Parser, preValidators: List[PreValidator], postValidators: List[PostValidator], 
+                 analyzer: List[Analyzer], errorHandler: ErrorHandler, childSpawner: ChildSpawner):
+        self._parser = parser
+        self._preValidator = preValidators
+        self._postValidators = postValidators
+        self._analyzer = analyzer
+        self._errorHandler = errorHandler
+        self._childSpawner = childSpawner
+
+    def _create_Job(self) -> Job:
+        return Job(self._parser, self._preValidator, self._postValidators, self._analyzer, self._errorHandler, self._childSpawner)

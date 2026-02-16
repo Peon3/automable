@@ -1,13 +1,4 @@
 import json
-from enum import Enum
-
-class JobStatus(str, Enum):
-    PENDING = "PENDING"
-    SUBMITTED = "SUBMITTED"
-    RUNNING = "RUNNING"
-    PARSING_NEEDED = "PARSING_NEEDED"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
 
 class StateManager:
     """
