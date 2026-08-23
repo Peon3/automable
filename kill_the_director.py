@@ -4,6 +4,12 @@ import analyzers
 import copy
 
 class JobDirector:
+    def __init__(self) -> None:
+        pass
+
+    def build_job(self, job: Job, parent: Job, config: Dict):
+        
+
     def asseble_job_from_state(self, state_dict: Dict[str, Any]) -> Job:
         job = Job()
         job.deserialize(state_dict)

@@ -31,7 +31,7 @@ class InputBuilder(ABC):
     Strategy for building input files from templates and job data.
     """
     @abstractmethod
-    def build_input(self, job_data: Any, template_path: str) -> str:
+    def build_input(self, job_data: Any, template_path: str) -> bool:
         pass
 
 
@@ -48,7 +48,7 @@ class PostValidator(ABC):
     Strategy pattern, valdiates in place, returns bool TODO: implement
     """
     @abstractmethod
-    def postValidate(self, job_results: dict) -> bool:
+    def postValidate(self, job_data: dict) -> bool:
         pass
 
 class Analyzer(ABC):
